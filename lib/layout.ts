@@ -21,6 +21,23 @@ const SIZE_MAX_MM: Record<StickerSize, number> = {
   large: 50,
 };
 
+/**
+ * Stickers with aspect ratio in this range count as "square-ish" — they get
+ * the full max edge so they read as visual anchors on the sheet.
+ */
+const SQUARE_ASPECT_MIN = 0.85;
+const SQUARE_ASPECT_MAX = 1 / SQUARE_ASPECT_MIN; // ≈ 1.18
+
+/** When `shrinkNonSquare` is enabled, non-square stickers get this fraction
+ *  of the max edge so they can be packed into row-end gaps without dragging
+ *  square stickers down with them. */
+const NON_SQUARE_SCALE = 0.7;
+
+function isSquareish(natW: number, natH: number): boolean {
+  const a = natW / natH;
+  return a >= SQUARE_ASPECT_MIN && a <= SQUARE_ASPECT_MAX;
+}
+
 export type LayoutOptions = {
   size: StickerSize;
   /** Cutting gap between adjacent stickers, in millimetres. */
@@ -28,9 +45,14 @@ export type LayoutOptions = {
   format: PageFormat;
   /**
    * `uniform` — items fit inside the size box, simple row grid (default).
-   * `dense`   — varied per-sticker size + skyline bin-packing to fill gaps.
+   * `dense`   — skyline bin-packing fills row-end gaps.
    */
   mode: LayoutMode;
+  /**
+   * When true, non-square stickers are scaled down (squares stay at full
+   * size) so they fit into tighter gaps and leave less whitespace.
+   */
+  shrinkNonSquare: boolean;
 };
 
 /**
@@ -49,6 +71,18 @@ function fitToBox(
   return { w: maxEdge * aspect, h: maxEdge };
 }
 
+/** Per-sticker max-edge: squares stay at `maxEdgeMm`, non-squares optionally
+ *  shrink. Returns the value to feed into `fitToBox`. */
+function maxEdgeFor(
+  natW: number,
+  natH: number,
+  maxEdgeMm: number,
+  shrinkNonSquare: boolean,
+): number {
+  if (!shrinkNonSquare || isSquareish(natW, natH)) return maxEdgeMm;
+  return maxEdgeMm * NON_SQUARE_SCALE;
+}
+
 export function layoutStickers(
   stickers: Sticker[],
   opts: LayoutOptions,
@@ -59,8 +93,8 @@ export function layoutStickers(
 
   const pages =
     opts.mode === "dense"
-      ? packDense(stickers, maxEdgeMm, gapMm, pageW, pageH)
-      : packUniform(stickers, maxEdgeMm, gapMm, pageW, pageH);
+      ? packDense(stickers, maxEdgeMm, gapMm, pageW, pageH, opts.shrinkNonSquare)
+      : packUniform(stickers, maxEdgeMm, gapMm, pageW, pageH, opts.shrinkNonSquare);
 
   return {
     pages,
@@ -80,6 +114,7 @@ function packUniform(
   gapMm: number,
   pageW: number,
   pageH: number,
+  shrinkNonSquare: boolean,
 ): Page[] {
   const usableW = pageW - PAGE_MARGIN_MM * 2;
   const usableH = pageH - PAGE_MARGIN_MM * 2;
@@ -101,7 +136,13 @@ function packUniform(
   startNewPage();
 
   for (const sticker of stickers) {
-    let { w, h } = fitToBox(sticker.width, sticker.height, maxEdgeMm);
+    const edge = maxEdgeFor(
+      sticker.width,
+      sticker.height,
+      maxEdgeMm,
+      shrinkNonSquare,
+    );
+    let { w, h } = fitToBox(sticker.width, sticker.height, edge);
     if (w > usableW) {
       // Defensive clamp; with size presets ≤ 50mm and A5 width 148mm this
       // should never trip, but very small page formats could in future.
@@ -127,7 +168,7 @@ function packUniform(
   return pages;
 }
 
-/* ---------- dense: same fit-to-box + skyline bottom-left packer ---------- */
+/* ---------- dense: MaxRects (maximal free rectangles) packer ---------- */
 
 type Sized = {
   sticker: Sticker;
@@ -136,10 +177,98 @@ type Sized = {
 };
 
 /**
- * One skyline segment along the top edge of the placed content. The packer
- * keeps these sorted by `x` and contiguous (cover the full page width).
+ * An axis-aligned rectangle. Used both for free space tracking and for
+ * representing newly placed items during free-rect maintenance.
  */
-type Seg = { x: number; width: number; top: number };
+type Rect = { x: number; y: number; w: number; h: number };
+
+const EPS = 0.0001;
+
+function rectContains(outer: Rect, inner: Rect): boolean {
+  return (
+    outer.x <= inner.x + EPS &&
+    outer.y <= inner.y + EPS &&
+    outer.x + outer.w >= inner.x + inner.w - EPS &&
+    outer.y + outer.h >= inner.y + inner.h - EPS
+  );
+}
+
+/**
+ * If `used` overlaps `free`, split `free` into up to 4 axis-aligned sub-
+ * rectangles (above / below / left of / right of the used rect). If there's
+ * no overlap, return `free` unchanged.
+ */
+function splitFreeRect(free: Rect, used: Rect): Rect[] {
+  if (
+    used.x >= free.x + free.w - EPS ||
+    used.x + used.w <= free.x + EPS ||
+    used.y >= free.y + free.h - EPS ||
+    used.y + used.h <= free.y + EPS
+  ) {
+    return [free];
+  }
+  const out: Rect[] = [];
+  if (used.y > free.y + EPS) {
+    out.push({ x: free.x, y: free.y, w: free.w, h: used.y - free.y });
+  }
+  if (used.y + used.h < free.y + free.h - EPS) {
+    out.push({
+      x: free.x,
+      y: used.y + used.h,
+      w: free.w,
+      h: free.y + free.h - (used.y + used.h),
+    });
+  }
+  if (used.x > free.x + EPS) {
+    out.push({ x: free.x, y: free.y, w: used.x - free.x, h: free.h });
+  }
+  if (used.x + used.w < free.x + free.w - EPS) {
+    out.push({
+      x: used.x + used.w,
+      y: free.y,
+      w: free.x + free.w - (used.x + used.w),
+      h: free.h,
+    });
+  }
+  return out;
+}
+
+/** Drop free rects that are fully contained inside another free rect. */
+function pruneFreeRects(rects: Rect[]): Rect[] {
+  const out: Rect[] = [];
+  for (let i = 0; i < rects.length; i++) {
+    let contained = false;
+    for (let j = 0; j < rects.length; j++) {
+      if (i === j) continue;
+      if (rectContains(rects[j], rects[i])) {
+        contained = true;
+        break;
+      }
+    }
+    if (!contained) out.push(rects[i]);
+  }
+  return out;
+}
+
+type FitResult = { freeIdx: number; pos: { x: number; y: number }; score: number };
+
+/**
+ * Best-Short-Side-Fit: for each free rect that can host (w, h), score it by
+ * the shorter of the two leftover dimensions. Smallest score wins — the
+ * standard recommendation for MaxRects packing density.
+ */
+function findBestFit(freeRects: Rect[], w: number, h: number): FitResult | null {
+  let best: FitResult | null = null;
+  for (let i = 0; i < freeRects.length; i++) {
+    const r = freeRects[i];
+    if (r.w + EPS < w || r.h + EPS < h) continue;
+    const score = Math.min(r.w - w, r.h - h);
+    if (best === null || score < best.score - EPS) {
+      best = { freeIdx: i, pos: { x: r.x, y: r.y }, score };
+    }
+  }
+  return best;
+}
 
 function packDense(
   stickers: Sticker[],
@@ -147,17 +276,19 @@ function packDense(
   gapMm: number,
   pageW: number,
   pageH: number,
+  shrinkNonSquare: boolean,
 ): Page[] {
   const usableW = pageW - PAGE_MARGIN_MM * 2;
   const usableH = pageH - PAGE_MARGIN_MM * 2;
 
-  // Every sticker fits inside the same N × N box (same rule as uniform mode).
-  // The gap-filling benefit of dense mode comes from natural aspect-ratio
-  // variation: a landscape sticker is shorter than a square, leaving a ledge
-  // the skyline packer can stack the next sticker onto. No artificial size
-  // jitter — the user sees a consistent grid feel.
   const sized: Sized[] = stickers.map((sticker) => {
-    let { w, h } = fitToBox(sticker.width, sticker.height, maxEdgeMm);
+    const edge = maxEdgeFor(
+      sticker.width,
+      sticker.height,
+      maxEdgeMm,
+      shrinkNonSquare,
+    );
+    let { w, h } = fitToBox(sticker.width, sticker.height, edge);
     if (w > usableW) {
       const scale = usableW / w;
       w *= scale;
@@ -169,134 +300,100 @@ function packDense(
   const pages: Page[] = [];
   let current: Page = { index: 1, stickers: [] };
   pages.push(current);
-  let skyline: Seg[] = [{ x: 0, width: usableW, top: 0 }];
+  let freeRects: Rect[] = [{ x: 0, y: 0, w: usableW, h: usableH }];
 
   const newPage = () => {
     current = { index: pages.length + 1, stickers: [] };
     pages.push(current);
-    skyline = [{ x: 0, width: usableW, top: 0 }];
+    freeRects = [{ x: 0, y: 0, w: usableW, h: usableH }];
   };
 
-  for (const item of sized) {
-    let placed = tryPlace(skyline, item, usableW, usableH, gapMm);
-    if (!placed) {
-      newPage();
-      placed = tryPlace(skyline, item, usableW, usableH, gapMm);
+  const consumeFreeRect = (used: Rect) => {
+    const next: Rect[] = [];
+    for (const f of freeRects) {
+      for (const piece of splitFreeRect(f, used)) {
+        next.push(piece);
+      }
     }
-    if (!placed) {
-      // Item bigger than a whole page even after sizing — degrade to a full-page
-      // placement to avoid losing the sticker.
+    freeRects = pruneFreeRects(next);
+  };
+
+  const remaining = sized.slice();
+
+  // Best-fit dynamic packing over MaxRects. At each step we scan every
+  // remaining item against every free rectangle (including "pockets"
+  // surrounded by placed stickers) and place the best (item, rect) pair.
+  // This pulls smaller stickers forward into existing gaps instead of
+  // pushing them to the next page.
+  while (remaining.length > 0) {
+    let bestItemIdx = -1;
+    let bestFit: FitResult | null = null;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const item = remaining[i];
+      // Reserve the cutting gap on the right and bottom side of each item
+      // by inflating the placement footprint. The visible sticker stays
+      // the original (item.w × item.h).
+      const effW = Math.min(item.w + gapMm, usableW);
+      const effH = Math.min(item.h + gapMm, usableH);
+      const fit = findBestFit(freeRects, effW, effH);
+      if (!fit) continue;
+      if (
+        bestFit === null ||
+        fit.score < bestFit.score - EPS ||
+        (Math.abs(fit.score - bestFit.score) < EPS &&
+          item.h > remaining[bestItemIdx].h + EPS)
+      ) {
+        bestItemIdx = i;
+        bestFit = fit;
+      }
+    }
+
+    if (bestItemIdx < 0 || bestFit === null) {
+      // Nothing fits on this page.
+      if (current.stickers.length === 0) {
+        // The next item is bigger than a whole page even after sizing —
+        // hard-place it full-bleed so we don't infinite-loop.
+        const item = remaining.shift()!;
+        const w = Math.min(item.w, usableW);
+        const h = Math.min(item.h, usableH);
+        current.stickers.push({
+          sticker: item.sticker,
+          x: PAGE_MARGIN_MM,
+          y: PAGE_MARGIN_MM,
+          width: w,
+          height: h,
+        });
+        consumeFreeRect({
+          x: 0,
+          y: 0,
+          w: Math.min(w + gapMm, usableW),
+          h: Math.min(h + gapMm, usableH),
+        });
+        continue;
+      }
       newPage();
-      const w = Math.min(item.w, usableW);
-      const h = Math.min(item.h, usableH);
-      current.stickers.push({
-        sticker: item.sticker,
-        x: PAGE_MARGIN_MM,
-        y: PAGE_MARGIN_MM,
-        width: w,
-        height: h,
-      });
-      skyline = updateSkyline(skyline, 0, w, h + gapMm);
       continue;
     }
+
+    const item = remaining.splice(bestItemIdx, 1)[0];
     current.stickers.push({
       sticker: item.sticker,
-      x: PAGE_MARGIN_MM + placed.x,
-      y: PAGE_MARGIN_MM + placed.top,
+      x: PAGE_MARGIN_MM + bestFit.pos.x,
+      y: PAGE_MARGIN_MM + bestFit.pos.y,
       width: item.w,
       height: item.h,
     });
-    skyline = updateSkyline(
-      skyline,
-      placed.x,
-      Math.min(item.w + gapMm, usableW - placed.x),
-      placed.top + item.h + gapMm,
-    );
+    consumeFreeRect({
+      x: bestFit.pos.x,
+      y: bestFit.pos.y,
+      w: Math.min(item.w + gapMm, usableW - bestFit.pos.x),
+      h: Math.min(item.h + gapMm, usableH - bestFit.pos.y),
+    });
   }
 
   if (pages.length > 1 && pages[pages.length - 1].stickers.length === 0) {
     pages.pop();
   }
   return pages;
-}
-
-/**
- * Find the bottom-left position where `item` fits on the skyline without
- * exceeding `usableH`. Returns null if nothing fits.
- */
-function tryPlace(
-  skyline: Seg[],
-  item: Sized,
-  usableW: number,
-  usableH: number,
-  gapMm: number,
-): { x: number; top: number } | null {
-  const reqW = Math.min(item.w + gapMm, usableW); // require gap on the right too
-  let best: { x: number; top: number } | null = null;
-
-  for (let i = 0; i < skyline.length; i++) {
-    const startX = skyline[i].x;
-    if (startX + reqW > usableW + 0.0001) continue;
-
-    const endX = startX + reqW;
-    let top = 0;
-    for (let j = i; j < skyline.length && skyline[j].x < endX; j++) {
-      top = Math.max(top, skyline[j].top);
-    }
-    if (top + item.h > usableH + 0.0001) continue;
-
-    if (
-      !best ||
-      top < best.top - 0.0001 ||
-      (Math.abs(top - best.top) < 0.0001 && startX < best.x)
-    ) {
-      best = { x: startX, top };
-    }
-  }
-  return best;
-}
-
-/**
- * Replace the skyline section under [x, x+width] with a new segment at
- * `newTop`, merging adjacent segments that share a top.
- */
-function updateSkyline(
-  skyline: Seg[],
-  x: number,
-  width: number,
-  newTop: number,
-): Seg[] {
-  const endX = x + width;
-  const next: Seg[] = [];
-
-  for (const seg of skyline) {
-    const segEnd = seg.x + seg.width;
-    if (segEnd <= x || seg.x >= endX) {
-      next.push(seg);
-      continue;
-    }
-    if (seg.x < x) {
-      next.push({ x: seg.x, width: x - seg.x, top: seg.top });
-    }
-    if (segEnd > endX) {
-      next.push({ x: endX, width: segEnd - endX, top: seg.top });
-    }
-  }
-  next.push({ x, width, top: newTop });
-  next.sort((a, b) => a.x - b.x);
-
-  const merged: Seg[] = [];
-  for (const s of next) {
-    const last = merged[merged.length - 1];
-    if (
-      last &&
-      Math.abs(last.top - s.top) < 0.0001 &&
-      Math.abs(last.x + last.width - s.x) < 0.0001
-    ) {
-      last.width += s.width;
-    } else {
-      merged.push({ ...s });
-    }
-  }
-  return merged;
 }

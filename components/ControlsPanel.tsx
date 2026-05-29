@@ -16,6 +16,8 @@ type Props = {
   onSizeChange: (size: StickerSize) => void;
   gapMm: number;
   onGapChange: (mm: number) => void;
+  shrinkNonSquare: boolean;
+  onShrinkNonSquareChange: (v: boolean) => void;
 };
 
 const SIZE_LABELS: Record<StickerSize, string> = {
@@ -41,6 +43,8 @@ export default function ControlsPanel({
   onSizeChange,
   gapMm,
   onGapChange,
+  shrinkNonSquare,
+  onShrinkNonSquareChange,
 }: Props) {
   return (
     <div className="flex flex-col gap-4 rounded-xl border border-stone-200 bg-white p-4">
@@ -140,6 +144,22 @@ export default function ControlsPanel({
           className="w-full accent-orange-500"
         />
       </div>
+
+      <label className="flex items-start gap-2 rounded-lg border border-stone-200 bg-stone-50 p-3 text-xs text-stone-700">
+        <input
+          type="checkbox"
+          checked={shrinkNonSquare}
+          onChange={(e) => onShrinkNonSquareChange(e.target.checked)}
+          className="mt-0.5 h-4 w-4 accent-orange-500"
+        />
+        <span>
+          <span className="font-medium">Kare olmayanları küçült</span>
+          <span className="block text-stone-500">
+            Kareler tam boyutta kalır, yatay/dikey sticker'lar küçülür ve
+            boşluklara yerleşir.
+          </span>
+        </span>
+      </label>
     </div>
   );
 }

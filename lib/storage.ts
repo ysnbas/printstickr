@@ -95,6 +95,7 @@ export type Prefs = {
   mode: LayoutMode;
   size: StickerSize;
   gapMm: number;
+  shrinkNonSquare: boolean;
 };
 
 const PREFS_KEY = "printstickr.prefs.v1";
@@ -104,6 +105,7 @@ export const DEFAULT_PREFS: Prefs = {
   mode: "uniform",
   size: "medium",
   gapMm: 1,
+  shrinkNonSquare: false,
 };
 
 export function loadPrefs(): Prefs {
@@ -125,6 +127,10 @@ export function loadPrefs(): Prefs {
         parsed.gapMm <= 8
           ? Math.round(parsed.gapMm)
           : DEFAULT_PREFS.gapMm,
+      shrinkNonSquare:
+        typeof parsed.shrinkNonSquare === "boolean"
+          ? parsed.shrinkNonSquare
+          : DEFAULT_PREFS.shrinkNonSquare,
     };
   } catch {
     return DEFAULT_PREFS;

@@ -38,6 +38,9 @@ export default function StickerStudio() {
   const [mode, setMode] = useState<LayoutMode>(DEFAULT_PREFS.mode);
   const [size, setSize] = useState<StickerSize>(DEFAULT_PREFS.size);
   const [gapMm, setGapMm] = useState(DEFAULT_PREFS.gapMm);
+  const [shrinkNonSquare, setShrinkNonSquare] = useState(
+    DEFAULT_PREFS.shrinkNonSquare,
+  );
   const [busy, setBusy] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +63,7 @@ export default function StickerStudio() {
         setMode(prefs.mode);
         setSize(prefs.size);
         setGapMm(prefs.gapMm);
+        setShrinkNonSquare(prefs.shrinkNonSquare);
       } catch (e) {
         console.error(e);
       } finally {
@@ -74,8 +78,8 @@ export default function StickerStudio() {
   // Persist prefs whenever they change (after the initial hydration).
   useEffect(() => {
     if (!hydrated) return;
-    savePrefs({ format, mode, size, gapMm });
-  }, [hydrated, format, mode, size, gapMm]);
+    savePrefs({ format, mode, size, gapMm, shrinkNonSquare });
+  }, [hydrated, format, mode, size, gapMm, shrinkNonSquare]);
 
   const addFromDataUrls = useCallback(
     async (items: Array<{ name: string; dataUrl: string }>) => {
@@ -163,8 +167,15 @@ export default function StickerStudio() {
   }, []);
 
   const layout = useMemo(
-    () => layoutStickers(entries, { size, gapMm, format, mode }),
-    [entries, size, gapMm, format, mode],
+    () =>
+      layoutStickers(entries, {
+        size,
+        gapMm,
+        format,
+        mode,
+        shrinkNonSquare,
+      }),
+    [entries, size, gapMm, format, mode, shrinkNonSquare],
   );
 
   const canExport = entries.length > 0 && !busy;
@@ -206,6 +217,8 @@ export default function StickerStudio() {
           onSizeChange={setSize}
           gapMm={gapMm}
           onGapChange={setGapMm}
+          shrinkNonSquare={shrinkNonSquare}
+          onShrinkNonSquareChange={setShrinkNonSquare}
         />
         <StickerList
           stickers={entries}
