@@ -10,6 +10,15 @@ import Uploader from "./Uploader";
 import { exportPdf, exportPng } from "@/lib/export";
 import { blobToDataUrl, fileToDataUrl } from "@/lib/image";
 import { layoutStickers } from "@/lib/layout";
+import {
+  addStickers as storeAddStickers,
+  clearAllStickers as storeClearAllStickers,
+  DEFAULT_PREFS,
+  loadPrefs,
+  loadStickers,
+  removeSticker as storeRemoveSticker,
+  savePrefs,
+} from "@/lib/storage";
 import { autoTrim } from "@/lib/trim";
 import {
   LayoutMode,
@@ -25,13 +34,48 @@ function uid(): string {
 
 export default function StickerStudio() {
   const [entries, setEntries] = useState<Sticker[]>([]);
-  const [format, setFormat] = useState<PageFormat>("a4");
-  const [mode, setMode] = useState<LayoutMode>("uniform");
-  const [size, setSize] = useState<StickerSize>("medium");
-  const [gapMm, setGapMm] = useState(1);
+  const [format, setFormat] = useState<PageFormat>(DEFAULT_PREFS.format);
+  const [mode, setMode] = useState<LayoutMode>(DEFAULT_PREFS.mode);
+  const [size, setSize] = useState<StickerSize>(DEFAULT_PREFS.size);
+  const [gapMm, setGapMm] = useState(DEFAULT_PREFS.gapMm);
   const [busy, setBusy] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pasteCounterRef = useRef(1);
+
+  // First mount: pull persisted stickers + prefs from the browser. Until this
+  // resolves we don't write prefs back (otherwise the first effect-driven
+  // save would clobber the just-loaded value with the initial default).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [stickers, prefs] = await Promise.all([
+          loadStickers(),
+          Promise.resolve(loadPrefs()),
+        ]);
+        if (cancelled) return;
+        setEntries(stickers);
+        setFormat(prefs.format);
+        setMode(prefs.mode);
+        setSize(prefs.size);
+        setGapMm(prefs.gapMm);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist prefs whenever they change (after the initial hydration).
+  useEffect(() => {
+    if (!hydrated) return;
+    savePrefs({ format, mode, size, gapMm });
+  }, [hydrated, format, mode, size, gapMm]);
 
   const addFromDataUrls = useCallback(
     async (items: Array<{ name: string; dataUrl: string }>) => {
@@ -51,6 +95,14 @@ export default function StickerStudio() {
           });
         }
         setEntries((prev) => [...prev, ...processed]);
+        try {
+          await storeAddStickers(processed);
+        } catch (e) {
+          console.error(e);
+          setError(
+            "Sticker tarayıcı belleğine kaydedilemedi (kota dolmuş olabilir).",
+          );
+        }
       } catch (e) {
         console.error(e);
         setError("Görsel işlenirken bir hata oluştu.");
@@ -102,10 +154,12 @@ export default function StickerStudio() {
 
   const onRemove = useCallback((id: string) => {
     setEntries((prev) => prev.filter((s) => s.id !== id));
+    storeRemoveSticker(id).catch((e) => console.error(e));
   }, []);
 
   const onClearAll = useCallback(() => {
     setEntries([]);
+    storeClearAllStickers().catch((e) => console.error(e));
   }, []);
 
   const layout = useMemo(

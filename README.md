@@ -23,6 +23,9 @@ APIs, zero running cost.
 - Adjustable cutting gap in millimetres (default 2 mm, range 0–8 mm)
 - Automatic multi-page output when content overflows
 - 300 DPI export (A4 ≈ 2480 × 3508 px, A5 ≈ 1748 × 2480 px) as PDF or PNG
+- **Local persistence** — uploaded stickers and your preferences are saved
+  in IndexedDB / localStorage, so closing the tab (or coming back days
+  later) doesn't lose your work
 
 ## Development
 
@@ -64,6 +67,7 @@ defaults (Framework: Next.js) are all you need.
   - `trim.ts` — `autoTrim`: corner-sampled, background-aware bounding-box crop
   - `layout.ts` — `layoutStickers`: uniform row grid and dense skyline bin-packer
   - `export.ts` — `exportPng`, `exportPdf` (jsPDF loaded via dynamic import)
+  - `storage.ts` — IndexedDB wrapper for stickers and localStorage wrapper for prefs
   - `types.ts` — shared types and page/format constants (mm)
 
 `jspdf` is loaded only at export time via `await import("jspdf")`, so SSR
